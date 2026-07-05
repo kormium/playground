@@ -14,6 +14,12 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+env:
+  # Web demos to publish, one directory each under the Pages site root (e.g.
+  # kormium.github.io/playground/sql-demo/). Add a module name here once it ships a
+  # wasmJsBrowserDistribution task, and add a matching entry to pages/index.html.
+  DEMOS: "sql-demo"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -30,8 +36,21 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       # Kotlin/Wasm production distribution — minified JS + wasm, no dev tooling.
-      - name: Build sql-demo (production)
-        run: ./gradlew :sql-demo:wasmJsBrowserDistribution --console=plain
+      - name: Build each demo (production)
+        run: |
+          for demo in $DEMOS; do
+            ./gradlew ":$demo:wasmJsBrowserDistribution" --console=plain
+          done
+
+      # One subdirectory per demo, so each gets its own stable URL, plus the landing page at the root.
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp pages/index.html _site/index.html
+          for demo in $DEMOS; do
+            mkdir -p "_site/$demo"
+            cp -r "$demo/build/dist/wasmJs/productionExecutable/." "_site/$demo/"
+          done
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
@@ -39,7 +58,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: sql-demo/build/dist/wasmJs/productionExecutable
+          path: _site
 
   deploy:
     needs: build

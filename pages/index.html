@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kormium Playground</title>
+    <style>
+        html, body {
+            margin: 0;
+            min-height: 100%;
+            font-family: system-ui, sans-serif;
+            background: #F1F5F9;
+            color: #0F172A;
+        }
+        main {
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 48px 24px;
+        }
+        h1 { font-size: 28px; margin-bottom: 8px; }
+        p.lead { color: #64748B; margin-top: 0; }
+        ul { list-style: none; padding: 0; margin: 24px 0 0; }
+        li + li { margin-top: 12px; }
+        a.demo {
+            display: block;
+            padding: 18px 20px;
+            border-radius: 12px;
+            border: 1px solid #E2E8F0;
+            background: #FFFFFF;
+            text-decoration: none;
+            color: #0F172A;
+        }
+        a.demo:hover { border-color: #4F46E5; }
+        a.demo .name { font-weight: 700; font-size: 16px; }
+        a.demo .desc { color: #64748B; font-size: 14px; margin-top: 4px; }
+    </style>
+</head>
+<body>
+<main>
+    <h1>Kormium Playground</h1>
+    <p class="lead">Small, self-contained demos built on <a href="https://github.com/kormium/kormium">Kormium</a>.</p>
+    <ul>
+        <li>
+            <a class="demo" href="sql-demo/">
+                <div class="name">sql-demo</div>
+                <div class="desc">A real SQL analytics dashboard running entirely in the browser — SQLite compiled to WebAssembly, queried through Kormium's type-safe Kotlin DSL. No server.</div>
+            </a>
+        </li>
+    </ul>
+</main>
+</body>
+</html>
