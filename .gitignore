@@ -49,7 +49,9 @@ bin/
 # Crawled datasets (rebuild with :sql-demo:runJvm) — too big for git
 *.db
 *.db.gz
+# The plain 25 MB feed is a build artifact; the ~9 MB .gz IS committed so the
+# GitHub Pages demo has data to load (see Exporter / GithubRepository.fetchGzipText).
 repos.tsv
-repos.tsv.gz
+!repos.tsv.gz
 *.db-shm
 *.db-wal

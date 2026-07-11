@@ -205,8 +205,8 @@ class GithubRepository private constructor(
         onPhase: (String) -> Unit = {},
     ): Long {
         val mark = TimeSource.Monotonic.markNow()
-        onPhase("Downloading the Kotlin-ecosystem dataset…")
-        val text = fetchText("repos.tsv")
+        onPhase("Downloading the Kotlin-ecosystem dataset (~9 MB)…")
+        val text = fetchGzipText("repos.tsv.gz")
         onPhase("Parsing ${text.length / 1_048_576} MB…")
         val lines = text.split('\n')
 
@@ -452,11 +452,16 @@ private fun computeEcosystem(
     )
 }
 
-/** Fetch a text resource. `r.text()` is decompressed transparently when the server sets gzip. */
-private suspend fun fetchText(url: String): String {
-    val jsString: kotlin.js.JsString = jsFetchText(url).await<kotlin.js.JsString>()
+/**
+ * Fetch a gzip-compressed text resource and decompress it in the browser via the Streams API's
+ * `DecompressionStream`. Decompressing client-side (rather than relying on the host to send the
+ * file with `Content-Encoding: gzip`) makes the ~9 MB feed load identically on GitHub Pages, a
+ * plain static host, or the dev server — the committed asset is the `.gz`, never the 25 MB plain TSV.
+ */
+private suspend fun fetchGzipText(url: String): String {
+    val jsString: kotlin.js.JsString = jsFetchGzipText(url).await<kotlin.js.JsString>()
     return jsString.toString()
 }
 
-private fun jsFetchText(url: String): kotlin.js.Promise<kotlin.js.JsString> =
-    js("fetch(url).then(function(r){ if(!r.ok){ throw new Error('HTTP '+r.status); } return r.text(); })")
+private fun jsFetchGzipText(url: String): kotlin.js.Promise<kotlin.js.JsString> =
+    js("fetch(url).then(function(r){ if(!r.ok){ throw new Error('HTTP '+r.status); } return new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).text(); })")
