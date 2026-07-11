@@ -6,16 +6,22 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.IndicationNodeFactory
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.InteractionSource
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -32,38 +38,45 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.node.DelegatableNode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 import com.himanshoe.charty.color.ChartyColor
 import com.himanshoe.charty.color.ChartyColors
 import com.himanshoe.charty.line.LineChart
@@ -105,9 +118,8 @@ private val SCHEME = lightColorScheme(
 
 private val Muted = Color(0xFF64748B)
 private val CardBorder = Color(0xFFE5E9F0)
-
-/** The two datasets the demo can query. GitHub is the headline; synthetic sales is the instant, no-download mode. */
-private enum class Dataset(val title: String) { GITHUB("Kotlin ecosystem"), SALES("Synthetic sales") }
+private val PrimaryHover = Color(0xFF4338CA) // primary, darkened for button hover
+private val ChipHover = Color(0xFFF1F5F9)     // subtle grey fill for chip hover
 
 /** A dataset-agnostic query-log line, so one QueryLogCard serves both screens. */
 data class LogLine(val label: String, val sql: String, val ms: Long)
@@ -128,25 +140,356 @@ private fun openUrl(url: String) {
     js("window.open(url, '_blank', 'noopener')")
 }
 
+/**
+ * A click target with no hover/press overlay. The default [clickable] indication draws a
+ * rectangular highlight that ignores our rounded clips, so on hover a mismatched box appeared
+ * behind the label — this drops the indication entirely for our flat, mockup-style controls.
+ */
+@Composable
+private fun Modifier.tapClickable(onClick: () -> Unit): Modifier =
+    clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)
+
+/**
+ * A no-op indication. Provided as [LocalIndication] so Material components that read the ambient
+ * indication (rather than their own ripple) draw no hover/press/focus state layer either — on
+ * Wasm/Skiko that state layer isn't clipped to the control's shape and showed as a rectangle.
+ */
+private object NoIndication : IndicationNodeFactory {
+    override fun create(interactionSource: InteractionSource): DelegatableNode = object : Modifier.Node() {}
+    override fun equals(other: Any?): Boolean = other === this
+    override fun hashCode(): Int = -1
+}
+
+/**
+ * Flat, custom-drawn replacements for Material's Button/FilterChip. Material's per-content hover
+ * state layer renders as an unclipped rectangle behind the label on Wasm/Skiko; these are built on
+ * [tapClickable] so they have no state layer at all — the whole control is one drawn shape.
+ */
+@Composable
+private fun PillButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val bg = when {
+        !enabled -> SCHEME.primary.copy(alpha = 0.4f)
+        hovered -> PrimaryHover
+        else -> SCHEME.primary
+    }
+    Box(
+        Modifier.clip(RoundedCornerShape(10.dp)).background(bg)
+            .clickable(interactionSource = interaction, indication = null) { if (enabled) onClick() }
+            .padding(horizontal = 16.dp, vertical = 9.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val bg = when {
+        selected -> if (hovered) PrimaryHover else SCHEME.primary
+        hovered -> ChipHover
+        else -> Color.White
+    }
+    Box(
+        Modifier.clip(RoundedCornerShape(8.dp)).background(bg)
+            .border(1.dp, if (selected) bg else CardBorder, RoundedCornerShape(8.dp))
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        Text(label, color = if (selected) Color.White else SCHEME.onSurface, fontSize = 13.sp)
+    }
+}
+
+// ---------- hand-drawn line icons (Compose/wasm's default font has no emoji glyphs) ----------
+
+private enum class Ico { BOLT, DB, STAR, FORK, GHOST, RECEIPT, MONEY, BARS, GRID, SEARCH, TREND, SCALE, API, INFO }
+
+@Composable
+private fun Ico(kind: Ico, tint: Color, size: Dp = 20.dp) {
+    Canvas(Modifier.size(size)) {
+        val s = this.size.minDimension
+        val stroke = Stroke(width = s * 0.09f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        fun p(x: Float, y: Float) = Offset(x * s, y * s)
+        fun line(x1: Float, y1: Float, x2: Float, y2: Float) =
+            drawLine(tint, p(x1, y1), p(x2, y2), strokeWidth = s * 0.09f, cap = StrokeCap.Round)
+        fun circle(cx: Float, cy: Float, r: Float, fill: Boolean = false) =
+            drawCircle(tint, radius = r * s, center = p(cx, cy), style = if (fill) androidx.compose.ui.graphics.drawscope.Fill else stroke)
+        fun poly(vararg xy: Float, fill: Boolean = true, close: Boolean = true) {
+            val path = Path()
+            var i = 0
+            while (i < xy.size) { val o = p(xy[i], xy[i + 1]); if (i == 0) path.moveTo(o.x, o.y) else path.lineTo(o.x, o.y); i += 2 }
+            if (close) path.close()
+            drawPath(path, tint, style = if (fill) androidx.compose.ui.graphics.drawscope.Fill else stroke)
+        }
+        when (kind) {
+            Ico.BOLT -> poly(0.58f, 0.06f, 0.24f, 0.56f, 0.46f, 0.56f, 0.4f, 0.94f, 0.78f, 0.42f, 0.54f, 0.42f)
+            Ico.DB -> {
+                drawOval(tint, topLeft = p(0.18f, 0.1f), size = Size(s * 0.64f, s * 0.2f), style = stroke)
+                line(0.18f, 0.2f, 0.18f, 0.8f); line(0.82f, 0.2f, 0.82f, 0.8f)
+                drawArc(tint, 0f, 180f, false, topLeft = p(0.18f, 0.4f), size = Size(s * 0.64f, s * 0.2f), style = stroke)
+                drawArc(tint, 0f, 180f, false, topLeft = p(0.18f, 0.7f), size = Size(s * 0.64f, s * 0.2f), style = stroke)
+            }
+            Ico.STAR -> {
+                val path = Path()
+                val cx = 0.5f; val cy = 0.52f; val ro = 0.44f; val ri = 0.18f
+                for (k in 0..10) {
+                    val r = if (k % 2 == 0) ro else ri
+                    val a = -PI / 2 + k * PI / 5
+                    val o = p(cx + (r * cos(a)).toFloat(), cy + (r * sin(a)).toFloat())
+                    if (k == 0) path.moveTo(o.x, o.y) else path.lineTo(o.x, o.y)
+                }
+                path.close(); drawPath(path, tint)
+            }
+            Ico.FORK -> {
+                circle(0.28f, 0.22f, 0.11f); circle(0.72f, 0.22f, 0.11f); circle(0.5f, 0.8f, 0.11f)
+                line(0.28f, 0.33f, 0.28f, 0.46f); line(0.72f, 0.33f, 0.72f, 0.46f)
+                line(0.28f, 0.46f, 0.72f, 0.46f); line(0.5f, 0.46f, 0.5f, 0.69f)
+            }
+            Ico.GHOST -> {
+                val path = Path()
+                path.moveTo(p(0.2f, 0.95f).x, p(0.2f, 0.95f).y)
+                path.lineTo(p(0.2f, 0.48f).x, p(0.2f, 0.48f).y)
+                path.cubicTo(p(0.2f, 0.12f).x, p(0.2f, 0.12f).y, p(0.8f, 0.12f).x, p(0.8f, 0.12f).y, p(0.8f, 0.48f).x, p(0.8f, 0.48f).y)
+                path.lineTo(p(0.8f, 0.95f).x, p(0.8f, 0.95f).y)
+                path.lineTo(p(0.65f, 0.82f).x, p(0.65f, 0.82f).y)
+                path.lineTo(p(0.5f, 0.95f).x, p(0.5f, 0.95f).y)
+                path.lineTo(p(0.35f, 0.82f).x, p(0.35f, 0.82f).y)
+                path.close(); drawPath(path, tint, style = stroke)
+                circle(0.4f, 0.45f, 0.05f, fill = true); circle(0.6f, 0.45f, 0.05f, fill = true)
+            }
+            Ico.RECEIPT -> {
+                poly(0.25f, 0.08f, 0.75f, 0.08f, 0.75f, 0.92f, 0.63f, 0.82f, 0.5f, 0.92f, 0.37f, 0.82f, 0.25f, 0.92f, fill = false)
+                line(0.36f, 0.32f, 0.64f, 0.32f); line(0.36f, 0.5f, 0.64f, 0.5f)
+            }
+            Ico.MONEY -> { circle(0.5f, 0.5f, 0.42f); line(0.5f, 0.24f, 0.5f, 0.76f); line(0.62f, 0.36f, 0.42f, 0.36f); line(0.38f, 0.64f, 0.58f, 0.64f) }
+            Ico.BARS -> { line(0.28f, 0.9f, 0.28f, 0.55f); line(0.5f, 0.9f, 0.5f, 0.3f); line(0.72f, 0.9f, 0.72f, 0.45f) }
+            Ico.GRID -> {
+                drawRect(tint, topLeft = p(0.16f, 0.16f), size = Size(s * 0.28f, s * 0.28f), style = stroke)
+                drawRect(tint, topLeft = p(0.56f, 0.16f), size = Size(s * 0.28f, s * 0.28f), style = stroke)
+                drawRect(tint, topLeft = p(0.16f, 0.56f), size = Size(s * 0.28f, s * 0.28f), style = stroke)
+                drawRect(tint, topLeft = p(0.56f, 0.56f), size = Size(s * 0.28f, s * 0.28f), style = stroke)
+            }
+            Ico.SEARCH -> { circle(0.42f, 0.42f, 0.28f); line(0.63f, 0.63f, 0.86f, 0.86f) }
+            Ico.TREND -> { poly(0.12f, 0.72f, 0.4f, 0.44f, 0.56f, 0.6f, 0.88f, 0.24f, fill = false, close = false); poly(0.66f, 0.24f, 0.88f, 0.24f, 0.88f, 0.46f, fill = false, close = false) }
+            Ico.SCALE -> { line(0.5f, 0.14f, 0.5f, 0.86f); line(0.22f, 0.28f, 0.78f, 0.28f); line(0.32f, 0.86f, 0.68f, 0.86f); drawArc(tint, 0f, 180f, false, topLeft = p(0.12f, 0.28f), size = Size(s * 0.2f, s * 0.2f), style = stroke); drawArc(tint, 0f, 180f, false, topLeft = p(0.68f, 0.28f), size = Size(s * 0.2f, s * 0.2f), style = stroke) }
+            Ico.API -> { poly(0.34f, 0.28f, 0.16f, 0.5f, 0.34f, 0.72f, fill = false, close = false); poly(0.66f, 0.28f, 0.84f, 0.5f, 0.66f, 0.72f, fill = false, close = false); line(0.56f, 0.24f, 0.44f, 0.76f) }
+            Ico.INFO -> { circle(0.5f, 0.5f, 0.42f); circle(0.5f, 0.32f, 0.03f, fill = true); line(0.5f, 0.46f, 0.5f, 0.7f) }
+        }
+    }
+}
+
 private fun Long.grouped(): String = toString().reversed().chunked(3).joinToString(",").reversed()
 private fun money(cents: Int): String = "$${cents / 100}.${pad2(cents % 100)}"
 private fun dollars(cents: Long): String = "$" + (cents / 100).grouped()
 
+/** The published Kormium version this demo builds against (see build.gradle.kts dependencies). */
+private const val KORMIUM_VERSION = "0.10.0"
+private const val KORMIUM_REPO_URL = "https://github.com/kormium/kormium"
+private const val KORMIUM_DOCS_URL = "https://github.com/kormium/kormium/blob/main/docs/README.md"
+
+/** Everything the sidebar can navigate to: the two live dashboards and the static doc pages. */
+private enum class Page(val label: String, val icon: Ico, val isDoc: Boolean) {
+    GITHUB("Kotlin ecosystem", Ico.DB, false),
+    SALES("Synthetic sales", Ico.BARS, false),
+    QUICK_START("Quick start", Ico.BOLT, true),
+    INSTALLATION("Installation", Ico.GRID, true),
+    BENCHMARKS("Benchmarks", Ico.TREND, true),
+}
+
+/** True on narrow (phone-width) viewports; drives the layout switches throughout the app. */
+private val LocalCompact = staticCompositionLocalOf { false }
+
 @Composable
 fun App() {
-    var dataset by remember { mutableStateOf(Dataset.GITHUB) }
+    var page by remember { mutableStateOf(Page.GITHUB) }
     MaterialTheme(colorScheme = SCHEME) {
-        Column(Modifier.fillMaxSize().background(SCHEME.background)) {
-            when (dataset) {
-                Dataset.GITHUB -> GithubScreen(dataset) { dataset = it }
-                Dataset.SALES -> SalesScreen(dataset) { dataset = it }
+        BoxWithConstraints(Modifier.fillMaxSize().background(SCHEME.background)) {
+            val compact = maxWidth < 720.dp
+            // Disable Material3's ripple/state layers: on Wasm/Skiko the hover state layer isn't
+            // clipped to the component shape, so it painted a rectangle behind chip/button labels.
+            CompositionLocalProvider(
+                LocalCompact provides compact,
+                LocalRippleConfiguration provides null,
+                LocalIndication provides NoIndication,
+            ) {
+                if (compact) {
+                    // Phone: the rail collapses into a slim top header with a scrollable pill nav.
+                    Column(Modifier.fillMaxSize()) {
+                        CompactNav(page) { page = it }
+                        Box(Modifier.weight(1f).fillMaxWidth()) { PageContent(page) }
+                    }
+                } else {
+                    Row(Modifier.fillMaxSize()) {
+                        Sidebar(page) { page = it }
+                        Box(Modifier.weight(1f).fillMaxHeight()) { PageContent(page) }
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun SalesScreen(dataset: Dataset, onDataset: (Dataset) -> Unit) {
+private fun PageContent(page: Page) {
+    when (page) {
+        Page.GITHUB -> GithubScreen()
+        Page.SALES -> SalesScreen()
+        else -> DocScreen(page)
+    }
+}
+
+/** Phone-width navigation: a dark header with the clickable logo and a horizontally scrollable pill row. */
+@Composable
+private fun CompactNav(current: Page, onNavigate: (Page) -> Unit) {
+    Column(Modifier.fillMaxWidth().background(SidebarBg)) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Row(
+                Modifier.clip(RoundedCornerShape(8.dp))
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { openUrl(KORMIUM_REPO_URL) },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(9.dp),
+            ) {
+                Box(Modifier.size(28.dp).clip(RoundedCornerShape(8.dp)).background(SCHEME.primary), contentAlignment = Alignment.Center) {
+                    Text("K", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                }
+                Text("Kormium", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            }
+            Text("v$KORMIUM_VERSION", color = SidebarMuted, fontSize = 11.sp)
+        }
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Page.entries.forEach { p -> NavPill(p.label, current == p) { onNavigate(p) } }
+            NavPill("Docs ↗", false) { openUrl(KORMIUM_DOCS_URL) }
+        }
+    }
+}
+
+@Composable
+private fun NavPill(label: String, active: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(999.dp))
+            .background(if (active) SCHEME.primary else SidebarActive)
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    ) {
+        Text(label, color = if (active) Color.White else SidebarMuted, fontSize = 13.sp, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal)
+    }
+}
+
+/** Lay metric cards in rows of [perRow], padding the final row so all cards keep equal width. */
+@Composable
+private fun MetricGrid(perRow: Int, metrics: List<@Composable RowScope.() -> Unit>) {
+    metrics.chunked(perRow).forEach { rowItems ->
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            rowItems.forEach { it() }
+            repeat(perRow - rowItems.size) { Spacer(Modifier.weight(1f)) }
+        }
+    }
+}
+
+/** Two cards side by side on wide viewports, stacked on compact ones. */
+@Composable
+private fun Pair2(a: @Composable () -> Unit, b: @Composable () -> Unit) {
+    if (LocalCompact.current) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) { a(); b() }
+    } else {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            Box(Modifier.weight(1f)) { a() }
+            Box(Modifier.weight(1f)) { b() }
+        }
+    }
+}
+
+// The dark navigation rail — the app's primary navigation between the two dashboards and the docs.
+private val SidebarBg = Color(0xFF0B1220)
+private val SidebarCard = Color(0xFF111C2E)
+private val SidebarActive = Color(0xFF1E293B)
+private val SidebarMuted = Color(0xFF94A3B8)
+private val SidebarFaint = Color(0xFF64748B)
+
+@Composable
+private fun Sidebar(current: Page, onNavigate: (Page) -> Unit) {
+    Column(Modifier.width(220.dp).fillMaxHeight().background(SidebarBg).padding(16.dp)) {
+        Row(
+            Modifier.padding(top = 4.dp, bottom = 20.dp).clip(RoundedCornerShape(8.dp))
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { openUrl(KORMIUM_REPO_URL) },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(Modifier.size(34.dp).clip(RoundedCornerShape(9.dp)).background(SCHEME.primary), contentAlignment = Alignment.Center) {
+                Text("K", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            }
+            Text("Kormium", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            SidebarLabel("Dashboards")
+            Page.entries.filter { !it.isDoc }.forEach { p ->
+                SidebarItem(p.icon, p.label, current == p) { onNavigate(p) }
+            }
+            SidebarLabel("Docs")
+            Page.entries.filter { it.isDoc }.forEach { p ->
+                SidebarItem(p.icon, p.label, current == p) { onNavigate(p) }
+            }
+            SidebarItem(Ico.API, "Docs ↗", active = false) { openUrl(KORMIUM_DOCS_URL) }
+        }
+        Box(Modifier.weight(1f))
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(SidebarCard).padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF22C55E)))
+                Text("Live database", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Text("283,090 repositories", color = SidebarMuted, fontSize = 11.sp)
+            Text("Updated just now", color = SidebarFaint, fontSize = 11.sp)
+        }
+        Text("Built with Kormium v$KORMIUM_VERSION", color = SidebarMuted, fontSize = 11.sp, modifier = Modifier.padding(top = 14.dp))
+        Text("Apache-2.0", color = SidebarFaint, fontSize = 11.sp)
+    }
+}
+
+@Composable
+private fun SidebarLabel(text: String) {
+    Text(
+        text.uppercase(), color = SidebarFaint, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(top = 14.dp, bottom = 4.dp, start = 12.dp),
+    )
+}
+
+@Composable
+private fun SidebarItem(icon: Ico, label: String, active: Boolean, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val fg = if (active || hovered) Color.White else SidebarMuted
+    val bg = when {
+        active -> SidebarActive
+        hovered -> SidebarActive.copy(alpha = 0.5f)
+        else -> Color.Transparent
+    }
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(bg)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Ico(icon, fg, size = 18.dp)
+        Text(label, color = fg, fontSize = 14.sp, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal)
+    }
+}
+
+@Composable
+private fun SalesScreen() {
     val scope = rememberCoroutineScope()
     var repo by remember { mutableStateOf<SalesRepository?>(null) }
     var building by remember { mutableStateOf(false) }
@@ -210,20 +553,19 @@ private fun SalesScreen(dataset: Dataset, onDataset: (Dataset) -> Unit) {
         }
     }
 
+    val compact = LocalCompact.current
     run {
         Column(Modifier.fillMaxSize().background(SCHEME.background)) {
-            TopBar(dataset, onDataset) {
+            TopBar {
                 listOf(100_000 to "100k", 500_000 to "500k", 1_000_000 to "1M").forEach { (n, label) ->
-                    Button(onClick = { load(n) }, enabled = repo != null && !building, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) {
-                        Text("Load $label")
-                    }
+                    PillButton("Load $label", enabled = repo != null && !building) { load(n) }
                 }
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(CardBorder))
 
             Box(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
                 Column(
-                    Modifier.widthIn(max = 1120.dp).fillMaxWidth().align(Alignment.TopCenter).padding(24.dp),
+                    Modifier.widthIn(max = 1120.dp).fillMaxWidth().align(Alignment.TopCenter).padding(if (compact) 12.dp else 24.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     val d = dashboard
@@ -231,12 +573,12 @@ private fun SalesScreen(dataset: Dataset, onDataset: (Dataset) -> Unit) {
                         repo == null -> Text("Booting SQLite in your browser…", color = Muted)
                         building -> BuildingBar(progress, target, buildPhase)
                         d != null -> {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                Metric("Latest query", "${queryLog.firstOrNull()?.ms ?: 0} ms", accent = true)
-                                Metric("Orders", d.count.grouped())
-                                Metric("Revenue", dollars(d.revenue))
-                                Metric("Avg order", money(d.avg.roundToInt()))
-                            }
+                            MetricGrid(if (compact) 2 else 4, listOf(
+                                { Metric("Latest query", "${queryLog.firstOrNull()?.ms ?: 0} ms", icon = Ico.BOLT, sub = "SQL timed live", tint = SCHEME.primary, accent = true) },
+                                { Metric("Orders", d.count.grouped(), icon = Ico.RECEIPT, sub = "matching rows", tint = Color(0xFFF59E0B)) },
+                                { Metric("Revenue", dollars(d.revenue), icon = Ico.MONEY, sub = "sum(amount)", tint = Color(0xFF22C55E)) },
+                                { Metric("Avg order", money(d.avg.roundToInt()), icon = Ico.BARS, sub = "per order", tint = Color(0xFF06B6D4)) },
+                            ))
                             Text(
                                 "${d.count.grouped()} matching of ${rows.toLong().grouped()} rows · " +
                                     "dataset built in ${genMs.grouped()} ms · all in the browser, no server",
@@ -247,20 +589,20 @@ private fun SalesScreen(dataset: Dataset, onDataset: (Dataset) -> Unit) {
                                 onAmount = { minAmount = it }, onAmountDone = { refresh() },
                                 onCategory = { category = it; refresh() }, onCountry = { country = it; refresh() })
 
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                                Box(Modifier.weight(1f)) {
+                            Pair2(
+                                {
                                     // charty's PieChart, like its LineChart, throws on empty data — guard it
                                     // for the zero-match filter case. (BarChart below is hand-drawn, so it's safe.)
                                     if (d.byCategory.isNotEmpty()) {
                                         PieCard("Revenue by category",
                                             d.byCategory.entries.sortedByDescending { it.value }.map { PieData(it.key, (it.value / 100).toFloat()) })
                                     }
-                                }
-                                Box(Modifier.weight(1f)) {
+                                },
+                                {
                                     BarChart("Orders by country",
                                         d.byCountry.entries.sortedByDescending { it.value }.map { it.key to it.value }) { it.grouped() }
-                                }
-                            }
+                                },
+                            )
                             // charty's LineChart throws on empty data — guard (e.g. a filter that matches nothing).
                             if (d.byMonth.isNotEmpty()) {
                                 LineCard("Revenue by month",
@@ -287,32 +629,60 @@ private fun SalesScreen(dataset: Dataset, onDataset: (Dataset) -> Unit) {
 }
 
 @Composable
-private fun TopBar(dataset: Dataset, onDataset: (Dataset) -> Unit, actions: @Composable RowScope.() -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().background(Color.White).padding(horizontal = 24.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Box(Modifier.size(12.dp).clip(CircleShape).background(SCHEME.primary))
-            Text("Kormium", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-            Text("SQL, running in your browser — no server", color = Muted, fontSize = 14.sp)
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(start = 8.dp)) {
-                Dataset.entries.forEach { d ->
-                    FilterChip(selected = dataset == d, onClick = { onDataset(d) }, label = { Text(d.title) })
-                }
+private fun TopBar(
+    title: String = "Kormium Playground",
+    subtitle: String = "SQL, running in your browser — no server",
+    actions: @Composable RowScope.() -> Unit = {},
+) {
+    val compact = LocalCompact.current
+    if (compact) {
+        // Phone: title over a horizontally scrollable action row, so wide button sets never clip.
+        Column(
+            Modifier.fillMaxWidth().background(Color.White).padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(title, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text(subtitle, color = Muted, fontSize = 13.sp)
             }
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                content = actions,
+            )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), content = actions)
+    } else {
+        Row(
+            Modifier.fillMaxWidth().background(Color.White).padding(horizontal = 24.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(title, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Text(subtitle, color = Muted, fontSize = 14.sp)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), content = actions)
+        }
     }
 }
 
 @Composable
-private fun RowScope.Metric(label: String, value: String, accent: Boolean = false) {
+private fun RowScope.Metric(
+    label: String, value: String,
+    icon: Ico? = null, sub: String = "", tint: Color = SCHEME.primary, accent: Boolean = false,
+) {
     AppCard(Modifier.weight(1f)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(label.uppercase(), color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            Text(value, fontSize = 26.sp, fontWeight = FontWeight.Bold, color = if (accent) SCHEME.primary else SCHEME.onSurface)
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (icon != null) {
+                Box(Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).background(tint.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) {
+                    Ico(icon, tint, size = 20.dp)
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(label, color = Muted, fontSize = 12.sp)
+                Text(value, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = if (accent) SCHEME.primary else SCHEME.onSurface)
+                if (sub.isNotEmpty()) Text(sub, color = Muted, fontSize = 11.sp)
+            }
         }
     }
 }
@@ -374,7 +744,7 @@ private fun QueryLogCard(entries: List<LogLine>, onClear: () -> Unit) {
     AppCard {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { expanded = !expanded },
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).tapClickable { expanded = !expanded },
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -386,9 +756,11 @@ private fun QueryLogCard(entries: List<LogLine>, onClear: () -> Unit) {
                     }
                 }
                 if (expanded && entries.isNotEmpty()) {
-                    TextButton(onClick = onClear, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
-                        Text("Clear")
-                    }
+                    Text(
+                        "Clear",
+                        Modifier.clip(RoundedCornerShape(6.dp)).tapClickable(onClear).padding(horizontal = 8.dp, vertical = 4.dp),
+                        color = SCHEME.primary, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                    )
                 }
             }
             if (expanded) {
@@ -441,7 +813,7 @@ private fun ChipRow(label: String, options: List<String?>, selected: String?, on
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.widthIn(min = 72.dp), fontSize = 13.sp, color = Muted)
         options.forEach { opt ->
-            FilterChip(selected = selected == opt, onClick = { onSelect(opt) }, label = { Text(opt ?: "All") })
+            Chip(opt ?: "All", selected == opt) { onSelect(opt) }
         }
     }
 }
@@ -502,23 +874,29 @@ private fun LineCard(title: String, data: List<LineData>) {
 
 @Composable
 private fun RecordsTable(rows: List<OrderRow>, sort: SortCol, asc: Boolean, onSort: (SortCol) -> Unit) {
+    val compact = LocalCompact.current
     AppCard {
         Column(Modifier.padding(12.dp)) {
             Text("Matching rows — click a header to sort (ORDER BY)", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                SortHeader("customer", SortCol.CUSTOMER, 2.2f, sort, asc, onSort)
-                SortHeader("product", SortCol.PRODUCT, 2.2f, sort, asc, onSort)
-                SortHeader("category", SortCol.CATEGORY, 1.4f, sort, asc, onSort)
-                SortHeader("country", SortCol.COUNTRY, 0.9f, sort, asc, onSort)
-                SortHeader("amount", SortCol.AMOUNT, 1.1f, sort, asc, onSort)
-                SortHeader("date", SortCol.DATE, 1.3f, sort, asc, onSort)
-            }
-            Box(Modifier.fillMaxWidth().height(1.dp).background(CardBorder))
-            LazyColumn(Modifier.fillMaxWidth().height(300.dp)) {
-                items(rows) { o ->
-                    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
-                        Cell(o.customer, 2.2f); Cell(o.product, 2.2f); Cell(o.category, 1.4f)
-                        Cell(o.country, 0.9f); Cell(money(o.amount), 1.1f); Cell(o.date, 1.3f)
+            // On phones the six columns don't fit; give the table a readable min width and scroll it sideways.
+            Box(if (compact) Modifier.horizontalScroll(rememberScrollState()) else Modifier.fillMaxWidth()) {
+                Column(if (compact) Modifier.width(680.dp) else Modifier.fillMaxWidth()) {
+                    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                        SortHeader("customer", SortCol.CUSTOMER, 2.2f, sort, asc, onSort)
+                        SortHeader("product", SortCol.PRODUCT, 2.2f, sort, asc, onSort)
+                        SortHeader("category", SortCol.CATEGORY, 1.4f, sort, asc, onSort)
+                        SortHeader("country", SortCol.COUNTRY, 0.9f, sort, asc, onSort)
+                        SortHeader("amount", SortCol.AMOUNT, 1.1f, sort, asc, onSort)
+                        SortHeader("date", SortCol.DATE, 1.3f, sort, asc, onSort)
+                    }
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(CardBorder))
+                    LazyColumn(Modifier.fillMaxWidth().height(300.dp)) {
+                        items(rows) { o ->
+                            Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+                                Cell(o.customer, 2.2f); Cell(o.product, 2.2f); Cell(o.category, 1.4f)
+                                Cell(o.country, 0.9f); Cell(money(o.amount), 1.1f); Cell(o.date, 1.3f)
+                            }
+                        }
                     }
                 }
             }
@@ -531,7 +909,7 @@ private fun RowScope.SortHeader(label: String, col: SortCol, weight: Float, sort
     val arrow = if (sort == col) (if (asc) " ▲" else " ▼") else ""
     Text(
         label + arrow,
-        Modifier.weight(weight).clickable { onSort(col) },
+        Modifier.weight(weight).tapClickable { onSort(col) },
         fontWeight = FontWeight.Bold, fontSize = 13.sp,
         color = if (sort == col) SCHEME.primary else Muted,
     )
@@ -550,7 +928,7 @@ private fun CodeBlock(code: String) {
 // ---------- Kotlin-ecosystem screen (the headline dataset: 283k real GitHub repos) ----------
 
 @Composable
-private fun GithubScreen(dataset: Dataset, onDataset: (Dataset) -> Unit) {
+private fun GithubScreen() {
     val scope = rememberCoroutineScope()
     var repo by remember { mutableStateOf<GithubRepository?>(null) }
     var building by remember { mutableStateOf(false) }
@@ -615,19 +993,16 @@ private fun GithubScreen(dataset: Dataset, onDataset: (Dataset) -> Unit) {
         }
     }
 
+    val compact = LocalCompact.current
     Column(Modifier.fillMaxSize().background(SCHEME.background)) {
-        TopBar(dataset, onDataset) {
-            Button(
-                onClick = { loadDataset() },
-                enabled = repo != null && !building,
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            ) { Text(if (loaded) "Reload 283k repos" else "Load 283k repos") }
+        TopBar {
+            PillButton(if (loaded) "Reload 283k repos" else "Load 283k repos", enabled = repo != null && !building) { loadDataset() }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(CardBorder))
 
         Box(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
             Column(
-                Modifier.widthIn(max = 1120.dp).fillMaxWidth().align(Alignment.TopCenter).padding(24.dp),
+                Modifier.widthIn(max = 1120.dp).fillMaxWidth().align(Alignment.TopCenter).padding(if (compact) 12.dp else 24.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 val d = dashboard
@@ -637,13 +1012,13 @@ private fun GithubScreen(dataset: Dataset, onDataset: (Dataset) -> Unit) {
                     !loaded -> GithubIntro(onLoad = ::loadDataset)
                     d != null -> {
                         val abandonedPct = if (d.count > 0) (d.abandoned * 100 / d.count) else 0
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Metric("Latest query", "${queryLog.firstOrNull()?.ms ?: 0} ms", accent = true)
-                            Metric("Repositories", d.count.grouped())
-                            Metric("Total stars", d.stars.grouped())
-                            Metric("Total forks", d.forks.grouped())
-                            Metric("Abandoned", "$abandonedPct%")
-                        }
+                        MetricGrid(if (compact) 2 else 5, listOf(
+                            { Metric("Latest query", "${queryLog.firstOrNull()?.ms ?: 0} ms", icon = Ico.BOLT, sub = "avg ${d.avgStars.roundToInt()} stars", tint = SCHEME.primary, accent = true) },
+                            { Metric("Repositories", d.count.grouped(), icon = Ico.DB, sub = "matching repos", tint = Color(0xFFF59E0B)) },
+                            { Metric("Total stars", d.stars.grouped(), icon = Ico.STAR, sub = "across all repos", tint = Color(0xFFF59E0B)) },
+                            { Metric("Total forks", d.forks.grouped(), icon = Ico.FORK, sub = "all repositories", tint = Color(0xFF06B6D4)) },
+                            { Metric("Abandoned", "$abandonedPct%", icon = Ico.GHOST, sub = "no push in 2y", tint = Color(0xFFEC4899)) },
+                        ))
                         Text(
                             "${d.count.grouped()} matching of ${rows.toLong().grouped()} Kotlin repos · " +
                                 "avg ${d.avgStars.roundToInt().toLong().grouped()} stars · " +
@@ -661,30 +1036,30 @@ private fun GithubScreen(dataset: Dataset, onDataset: (Dataset) -> Unit) {
                                 d.byYear.entries.sortedBy { it.key }.map { LineData(it.key.toString(), it.value.toFloat()) })
                         }
 
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                            Box(Modifier.weight(1f)) {
+                        Pair2(
+                            {
                                 BarChart("Repositories by star count — the iceberg",
                                     d.byBucket.map { it.first to it.second }) { it.grouped() }
-                            }
-                            Box(Modifier.weight(1f)) {
+                            },
+                            {
                                 if (d.byLicense.isNotEmpty()) {
                                     PieCard("Repositories by license",
                                         d.byLicense.entries.sortedByDescending { it.value }.take(6).map { PieData(it.key, it.value.toFloat()) })
                                 }
-                            }
-                        }
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                            Box(Modifier.weight(1f)) {
+                            },
+                        )
+                        Pair2(
+                            {
                                 BarChart("Top owners (matching repos)",
                                     d.topOwners.map { it.first to it.second }) { it.grouped() }
-                            }
-                            Box(Modifier.weight(1f)) {
+                            },
+                            {
                                 if (topTopics.isNotEmpty()) {
                                     BarChart("Most common topics (whole ecosystem)",
                                         topTopics.take(10).map { it.first to it.second }) { it.grouped() }
                                 }
-                            }
-                        }
+                            },
+                        )
                         BarChart("Total stars by creation year",
                             d.starsByYear.entries.sortedBy { it.key }.map { it.key.toString() to it.value }) { it.grouped() }
 
@@ -721,9 +1096,7 @@ private fun GithubIntro(onLoad: () -> Unit) {
                     "Loading downloads a ~9 MB feed and rebuilds the database in your browser.",
                 color = Muted, fontSize = 14.sp,
             )
-            Button(onClick = onLoad, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp)) {
-                Text("Load 283k repos")
-            }
+            PillButton("Load 283k repos", onClick = onLoad)
         }
     }
 }
@@ -756,7 +1129,7 @@ private fun GithubFilters(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Status", Modifier.widthIn(min = 72.dp), fontSize = 13.sp, color = Muted)
                 listOf(RepoStatus.ALL to "All", RepoStatus.ACTIVE to "Active", RepoStatus.ABANDONED to "Abandoned (no push 2y)").forEach { (s, label) ->
-                    FilterChip(selected = status == s, onClick = { onStatus(s) }, label = { Text(label) })
+                    Chip(label, status == s) { onStatus(s) }
                 }
             }
         }
@@ -765,36 +1138,42 @@ private fun GithubFilters(
 
 @Composable
 private fun GithubTable(rows: List<RepoRow>, sort: RepoSort, asc: Boolean, onSort: (RepoSort) -> Unit) {
+    val compact = LocalCompact.current
     AppCard {
         Column(Modifier.padding(12.dp)) {
             Text("Matching repositories — click a header to sort (ORDER BY)", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                RepoSortHeader("repository", RepoSort.NAME, 2.6f, sort, asc, onSort)
-                Text("topics", Modifier.weight(2.4f), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Muted)
-                RepoSortHeader("stars", RepoSort.STARS, 1.0f, sort, asc, onSort)
-                Text("forks", Modifier.weight(0.9f), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Muted)
-                Text("license", Modifier.weight(1.2f), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Muted)
-                RepoSortHeader("created", RepoSort.CREATED, 1.1f, sort, asc, onSort)
-                RepoSortHeader("last push", RepoSort.PUSHED, 1.1f, sort, asc, onSort)
-            }
-            Box(Modifier.fillMaxWidth().height(1.dp).background(CardBorder))
-            LazyColumn(Modifier.fillMaxWidth().height(320.dp)) {
-                items(rows) { r ->
-                    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
-                        Text(
-                            "${r.owner}/${r.name}",
-                            Modifier.weight(2.6f).clickable { openUrl("https://github.com/${r.owner}/${r.name}") },
-                            fontSize = 13.sp,
-                            color = SCHEME.primary,
-                            textDecoration = TextDecoration.Underline,
-                            maxLines = 1,
-                        )
-                        Text(r.topics.replace(",", ", ").ifEmpty { "—" }, Modifier.weight(2.4f), fontSize = 12.sp, color = Muted, maxLines = 1)
-                        Cell("★ ${r.stars.toLong().grouped()}", 1.0f)
-                        Cell("⑂ ${r.forks.toLong().grouped()}", 0.9f)
-                        Cell(r.license.ifEmpty { "—" }, 1.2f)
-                        Cell(r.createdAt, 1.1f)
-                        Cell(r.pushedAt.ifEmpty { "—" }, 1.1f)
+            // On phones the seven columns don't fit; give the table a readable min width and scroll it sideways.
+            Box(if (compact) Modifier.horizontalScroll(rememberScrollState()) else Modifier.fillMaxWidth()) {
+                Column(if (compact) Modifier.width(820.dp) else Modifier.fillMaxWidth()) {
+                    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                        RepoSortHeader("repository", RepoSort.NAME, 2.6f, sort, asc, onSort)
+                        Text("topics", Modifier.weight(2.4f), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Muted)
+                        RepoSortHeader("stars", RepoSort.STARS, 1.0f, sort, asc, onSort)
+                        Text("forks", Modifier.weight(0.9f), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Muted)
+                        Text("license", Modifier.weight(1.2f), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Muted)
+                        RepoSortHeader("created", RepoSort.CREATED, 1.1f, sort, asc, onSort)
+                        RepoSortHeader("last push", RepoSort.PUSHED, 1.1f, sort, asc, onSort)
+                    }
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(CardBorder))
+                    LazyColumn(Modifier.fillMaxWidth().height(320.dp)) {
+                        items(rows) { r ->
+                            Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+                                Text(
+                                    "${r.owner}/${r.name}",
+                                    Modifier.weight(2.6f).tapClickable { openUrl("https://github.com/${r.owner}/${r.name}") },
+                                    fontSize = 13.sp,
+                                    color = SCHEME.primary,
+                                    textDecoration = TextDecoration.Underline,
+                                    maxLines = 1,
+                                )
+                                Text(r.topics.replace(",", ", ").ifEmpty { "—" }, Modifier.weight(2.4f), fontSize = 12.sp, color = Muted, maxLines = 1)
+                                Cell("★ ${r.stars.toLong().grouped()}", 1.0f)
+                                Cell("⑂ ${r.forks.toLong().grouped()}", 0.9f)
+                                Cell(r.license.ifEmpty { "—" }, 1.2f)
+                                Cell(r.createdAt, 1.1f)
+                                Cell(r.pushedAt.ifEmpty { "—" }, 1.1f)
+                            }
+                        }
                     }
                 }
             }
@@ -807,7 +1186,7 @@ private fun RowScope.RepoSortHeader(label: String, col: RepoSort, weight: Float,
     val arrow = if (sort == col) (if (asc) " ▲" else " ▼") else ""
     Text(
         label + arrow,
-        Modifier.weight(weight).clickable { onSort(col) },
+        Modifier.weight(weight).tapClickable { onSort(col) },
         fontWeight = FontWeight.Bold, fontSize = 13.sp,
         color = if (sort == col) SCHEME.primary else Muted,
     )
@@ -850,7 +1229,7 @@ private fun MultiLineCard(
                         val rowModifier = if (toggleable) {
                             Modifier
                                 .clip(RoundedCornerShape(6.dp))
-                                .clickable { hidden = if (on) hidden + s.name else hidden - s.name }
+                                .tapClickable { hidden = if (on) hidden + s.name else hidden - s.name }
                                 .padding(horizontal = 6.dp, vertical = 3.dp)
                         } else {
                             Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
@@ -979,9 +1358,9 @@ private fun EcosystemSection(eco: EcosystemStats) {
         yTopLabel = "100%",
     )
 
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        // 3. Cumulative repositories in existence.
-        Box(Modifier.weight(1f)) {
+    Pair2(
+        {
+            // 3. Cumulative repositories in existence.
             val cum = eco.cumulativeByYear.toMap()
             MultiLineCard(
                 title = "Cumulative Kotlin repositories",
@@ -990,9 +1369,9 @@ private fun EcosystemSection(eco: EcosystemStats) {
                 series = listOf(LineSeries("", SCHEME.primary, years.map { (cum[it] ?: 0L).toFloat() })),
                 yTopLabel = eco.cumulativeByYear.lastOrNull()?.second?.grouped() ?: "",
             )
-        }
-        // 6. Star inequality: the Lorenz curve.
-        Box(Modifier.weight(1f)) {
+        },
+        {
+            // 6. Star inequality: the Lorenz curve.
             MultiLineCard(
                 title = "Star inequality — Lorenz curve",
                 subtitle = "top 1% of repos hold ${eco.top1PctStarShare}% of all stars · top 10% hold ${eco.top10PctStarShare}%",
@@ -1004,8 +1383,8 @@ private fun EcosystemSection(eco: EcosystemStats) {
                 yMax = 1f,
                 yTopLabel = "100% of stars",
             )
-        }
-    }
+        },
+    )
 
     // 5. Active vs abandoned by creation year — volume and decay in one.
     StackedBarCard(
@@ -1014,3 +1393,390 @@ private fun EcosystemSection(eco: EcosystemStats) {
         rows = eco.activeAbandonedByYear.map { Triple(it.first.toString(), it.second, it.third) },
     )
 }
+
+// ---------- doc pages (a tiny Markdown renderer over the real Kormium docs) ----------
+
+@Composable
+private fun DocScreen(page: Page) {
+    val subtitle = when (page) {
+        Page.QUICK_START -> "Declare a table and run CRUD in a few minutes"
+        Page.INSTALLATION -> "Add Kormium to your Gradle build"
+        Page.BENCHMARKS -> "Kormium vs Exposed vs Hibernate on PostgreSQL"
+        else -> ""
+    }
+    val compact = LocalCompact.current
+    Column(Modifier.fillMaxSize().background(SCHEME.background)) {
+        TopBar(title = page.label, subtitle = subtitle)
+        Box(Modifier.fillMaxWidth().height(1.dp).background(CardBorder))
+        Box(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
+            Column(
+                Modifier.widthIn(max = 900.dp).fillMaxWidth().align(Alignment.TopCenter).padding(if (compact) 12.dp else 24.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                AppCard {
+                    Column(Modifier.padding(if (compact) 16.dp else 24.dp)) { MarkdownView(docText(page)) }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    PillButton("Open full docs ↗") { openUrl(KORMIUM_DOCS_URL) }
+                }
+            }
+        }
+    }
+}
+
+private fun docText(page: Page): String = when (page) {
+    Page.QUICK_START -> DOC_QUICK_START
+    Page.INSTALLATION -> DOC_INSTALLATION
+    Page.BENCHMARKS -> DOC_BENCHMARKS
+    else -> ""
+}
+
+private sealed interface MdBlock
+private data class MdHeading(val level: Int, val text: String) : MdBlock
+private data class MdPara(val text: String) : MdBlock
+private data class MdCode(val text: String) : MdBlock
+private data class MdBullets(val items: List<String>) : MdBlock
+private data class MdTable(val header: List<String>, val rows: List<List<String>>) : MdBlock
+
+// Strip the inline Markdown this renderer doesn't style: links become their text, and the
+// code-span backticks and bold markers are removed.
+private fun inlineMd(s: String): String {
+    var r = Regex("\\[([^\\]]+)\\]\\([^)]*\\)").replace(s) { it.groupValues[1] }
+    r = r.replace("**", "").replace("`", "").replace("\\*", "*")
+    return r
+}
+
+private fun mdRow(line: String): List<String> = line.trim().trim('|').split("|").map { inlineMd(it.trim()) }
+
+private fun parseMarkdown(md: String): List<MdBlock> {
+    val out = ArrayList<MdBlock>()
+    val lines = md.split('\n')
+    var i = 0
+    val para = StringBuilder()
+    fun flushPara() {
+        if (para.isNotBlank()) out.add(MdPara(inlineMd(para.toString().trim())))
+        para.setLength(0)
+    }
+    while (i < lines.size) {
+        val t = lines[i].trim()
+        when {
+            t.startsWith("```") -> {
+                flushPara()
+                val sb = StringBuilder(); i++
+                while (i < lines.size && !lines[i].trim().startsWith("```")) { sb.append(lines[i]).append('\n'); i++ }
+                i++ // closing fence
+                out.add(MdCode(sb.toString().trimEnd('\n')))
+            }
+            t.startsWith("#") -> {
+                flushPara()
+                val level = t.takeWhile { it == '#' }.length
+                out.add(MdHeading(level, inlineMd(t.drop(level).trim())))
+                i++
+            }
+            t.startsWith("|") && i + 1 < lines.size && lines[i + 1].trim().startsWith("|") && lines[i + 1].contains("---") -> {
+                flushPara()
+                val header = mdRow(t)
+                i += 2
+                val rows = ArrayList<List<String>>()
+                while (i < lines.size && lines[i].trim().startsWith("|")) { rows.add(mdRow(lines[i])); i++ }
+                out.add(MdTable(header, rows))
+            }
+            t.startsWith("- ") || t.startsWith("* ") -> {
+                flushPara()
+                val items = ArrayList<String>()
+                while (i < lines.size && (lines[i].trim().startsWith("- ") || lines[i].trim().startsWith("* "))) {
+                    items.add(inlineMd(lines[i].trim().drop(2).trim())); i++
+                }
+                out.add(MdBullets(items))
+            }
+            t.isEmpty() -> { flushPara(); i++ }
+            else -> { para.append(' ').append(t); i++ }
+        }
+    }
+    flushPara()
+    return out
+}
+
+@Composable
+private fun MarkdownView(md: String) {
+    val blocks = remember(md) { parseMarkdown(md) }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        blocks.forEach { b ->
+            when (b) {
+                // The H1 duplicates the page title in the TopBar, so it's skipped.
+                is MdHeading -> if (b.level > 1) Text(
+                    b.text,
+                    fontSize = if (b.level == 2) 19.sp else 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = SCHEME.onSurface,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                is MdPara -> Text(b.text, fontSize = 14.sp, color = SCHEME.onSurface)
+                is MdCode -> CodeBlock(b.text)
+                is MdBullets -> Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    b.items.forEach { item ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("•", fontSize = 14.sp, color = Muted)
+                            Text(item, fontSize = 14.sp, color = SCHEME.onSurface)
+                        }
+                    }
+                }
+                is MdTable -> MdTableView(b)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MdTableView(t: MdTable) {
+    val compact = LocalCompact.current
+    val cols = t.header.size.coerceAtLeast(1)
+    val outer = if (compact) Modifier.horizontalScroll(rememberScrollState()) else Modifier.fillMaxWidth()
+    val inner = if (compact) Modifier.width((cols * 130).dp) else Modifier.fillMaxWidth()
+    Box(outer) {
+    Column(inner.clip(RoundedCornerShape(8.dp)).border(1.dp, CardBorder, RoundedCornerShape(8.dp))) {
+        Row(Modifier.fillMaxWidth().background(SCHEME.surfaceVariant)) {
+            t.header.forEach { c ->
+                Text(c, Modifier.weight(1f).padding(horizontal = 10.dp, vertical = 8.dp), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = SCHEME.onSurface)
+            }
+        }
+        t.rows.forEach { row ->
+            Box(Modifier.fillMaxWidth().height(1.dp).background(CardBorder))
+            Row(Modifier.fillMaxWidth()) {
+                for (k in 0 until cols) {
+                    Text(row.getOrElse(k) { "" }, Modifier.weight(1f).padding(horizontal = 10.dp, vertical = 8.dp), fontSize = 12.sp, color = SCHEME.onSurface)
+                }
+            }
+        }
+    }
+    }
+}
+
+// ---------- doc content (excerpted from /docs in the Kormium repo) ----------
+
+private val DOC_QUICK_START = """
+# Quick Start
+
+This guide creates a catalog, declares a table, connects to PostgreSQL and runs basic CRUD.
+
+## 1. Define a Catalog
+
+A `Catalog` is a type tag for one logical database. It has no runtime data; it exists so the
+compiler can reject using tables with the wrong database handle.
+
+```kotlin
+import io.github.kormium.Catalog
+
+object App : Catalog
+```
+
+## 2. Define a Table and Entity
+
+```kotlin
+object Users : Table<App, User>("users", ::User) {
+    val id by Column.UUID().primaryKey()
+    val name by Column.Text()
+    val age by Column.Int()
+    val note by Column.Text().nullable()
+}
+
+class User : Entity() {
+    var id by Users.id
+    var name by Users.name
+    var age by Users.age
+    var note by Users.note
+}
+```
+
+Columns register themselves when the delegated properties are declared. Read operations
+select columns in declaration order and map rows back into entity fields.
+
+## 3. Connect
+
+```kotlin
+val db: Database<App> = createDatabase(
+    host = "localhost",
+    port = 5432,
+    database = "postgres",
+    user = "postgres",
+    password = "password",
+    poolSize = 10,
+)
+```
+
+Assigning the factory result to `Database<App>` pins the catalog type. The driver itself is
+catalog-agnostic.
+
+## 4. Insert and Read
+
+```kotlin
+val user = User().apply {
+    id = Uuid.random()
+    name = "Ada"
+    age = 36
+}
+
+db.transaction {
+    Users.insert(user)
+}
+
+val adults: List<User> = db.autocommit {
+    Users.find {
+        where { Users.age gtEq 18 }
+        orderBy DESC Users.age
+        limit = 50
+    }
+}
+```
+
+`transaction { }` wraps the block in `BEGIN` / `COMMIT` / `ROLLBACK`. `autocommit { }`
+pins one connection without an explicit transaction, which is useful for simple reads.
+
+## 5. Update and Delete
+
+```kotlin
+db.transaction {
+    Users.update(User().apply { age = 37 }) {
+        where { Users.id eq user.id }
+    }
+
+    Users.deleteWhere {
+        where { Users.name eq "Ada" }
+    }
+}
+```
+
+`update` only writes properties assigned on the patch entity. An untouched property is
+omitted, while a property explicitly set to `null` is written as SQL `NULL`.
+
+## SQLite Variant
+
+The table and query code stays the same. Swap only the factory:
+
+```kotlin
+val db: Database<App> = createSqliteDatabase()      // in-memory
+val fileDb: Database<App> = createSqliteDatabase("app.db")
+```
+""".trimIndent()
+
+private val DOC_INSTALLATION = """
+# Installation
+
+Kormium is published to Maven Central under the group `io.github.kormium`.
+
+The recommended Gradle setup is to import `kormium-bom` once and then declare artifacts
+without versions:
+
+```kotlin
+dependencies {
+    implementation(platform("io.github.kormium:kormium-bom:$KORMIUM_VERSION"))
+
+    implementation("io.github.kormium:kormium-postgres")
+    // or:
+    implementation("io.github.kormium:kormium-sqlite")
+    // or, JVM-only true async PostgreSQL:
+    implementation("io.github.kormium:kormium-r2dbc")
+}
+```
+
+## Requirements
+
+- JDK 21 or newer for JVM builds.
+- Kotlin Multiplatform project setup if you use Native, Android or iOS targets.
+- PostgreSQL client libraries for the Native PostgreSQL driver.
+- SQLite headers for Native SQLite on Linux if your distribution does not install them by default.
+
+## Artifacts
+
+| Artifact | Add when |
+| --- | --- |
+| kormium-core | You implement a custom backend or only need the common DSL types |
+| kormium-decimal | You store exact decimals (numeric / DECIMAL columns) |
+| kormium-postgres | You use PostgreSQL through JDBC on JVM or libpq on Native |
+| kormium-sqlite | You use SQLite on JVM, Native or Android |
+| kormium-r2dbc | You want non-blocking PostgreSQL on JVM |
+| kormium-migrate | You want a raw-SQL schema migration runner |
+| kormium-observe | You want reactive Flow queries that re-emit when data changes |
+| kormium-ktor | You want explicit database passing in Ktor routes |
+| kormium-bom | Always — pins one consistent version across all artifacts |
+
+Backend artifacts bring `kormium-core` transitively. `kormium-observe` is pure common code and
+supports the same targets as `kormium-core` (JVM, Native, Android, iOS).
+
+## Platform Matrix
+
+| Platform | postgres | sqlite | r2dbc |
+| --- | --- | --- | --- |
+| JVM | JDBC/HikariCP | sqlite-jdbc | Yes |
+| Linux Native | libpq | sqlite3 | No |
+| macOS Native | libpq | sqlite3 | No |
+| Android | No | AndroidX SQLite | No |
+| iOS | No | sqlite3 | No |
+| Wasm | No | Planned | No |
+""".trimIndent()
+
+private val DOC_BENCHMARKS = """
+# Benchmarks
+
+The full comparison matrix: **Kormium JVM**, **Kormium Native** (libpq, no JVM), **Exposed**
+and **Hibernate**, all against the same PostgreSQL workload.
+
+## TL;DR
+
+```bash
+# from the repo root; the only prerequisite is a running Docker daemon
+./benchmarks/run.sh
+```
+
+The script starts one tuned PostgreSQL container, runs the Kotlin/Native harness, then the
+JVM JMH benchmarks, and prints a merged summary (~20 minutes):
+
+```
+Benchmark summary — ops/s, higher is better
+════════════════════════════════════════════
+Operation    Kormium JVM  Kormium Native  Exposed  Hibernate
+------------------------------------------------------------
+findById          16,253          22,988    7,688     15,535
+selectWhere       16,022          24,096    7,637     15,873
+```
+
+Useful flags:
+
+| Flag | Effect |
+| --- | --- |
+| --quick | fast indicative run, ~3 minutes — for checking the setup, not for quoting |
+| --skip-native | JVM ORMs only (works on hosts without a native toolchain) |
+| --skip-jvm | native harness only, then re-render the merged summary |
+
+## What is measured
+
+Six operations per ORM, all against the same table (uuid primary key, `text` + `numeric`
+columns, index on `name`), 8 benchmark threads, connection pool of 8 for every ORM:
+
+| Operation | Shape |
+| --- | --- |
+| findById | SELECT by primary key, autocommit |
+| selectWhere | SELECT ... WHERE name = ?, index lookup returning 1 row |
+| selectMany | same, returning 100 rows — measures row materialization |
+| insert | single-row INSERT in a transaction |
+| batchInsert | 50 rows per transaction, each ORM's idiomatic batch API |
+| updateById | single-row UPDATE by primary key (random row out of 1024) |
+
+Competitor versions: Exposed 1.0.0-beta-4 and Hibernate ORM 7.0.2.Final, both via HikariCP.
+
+## Methodology and stability
+
+- JMH 1.37; per benchmark: 2 forks, 5×2s warmup + 5×2s measurement, fixed 2 GiB heap.
+- PostgreSQL (postgres:16-alpine) keeps its data directory on tmpfs and runs with fsync,
+  synchronous_commit and full_page_writes off. The benchmarks measure ORM/driver overhead,
+  not disk latency. All ORMs get the same database.
+- The table is truncated and reseeded between iterations, so write benchmarks do not grow it
+  and drag later iterations.
+
+## Honesty notes
+
+These are the project's own benchmarks. Treat every number as relative: compare columns within
+one run on one machine, not against tables published elsewhere. The native column comes from a
+simpler harness than JMH. Run everything on your own hardware and database before making
+architecture decisions.
+""".trimIndent()
