@@ -3,35 +3,43 @@
 package io.github.kormium.sample.sqldemo
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -115,15 +123,33 @@ fun App() {
     var dashboard by remember { mutableStateOf<Dashboard?>(null) }
     var sample by remember { mutableStateOf<List<OrderRow>>(emptyList()) }
     var queryJob by remember { mutableStateOf<Job?>(null) }
+    var queryLog by remember { mutableStateOf<List<QueryLogEntry>>(emptyList()) }
+    var buildPhase by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) { repo = SalesRepository.open() }
 
+    fun appendLog(entry: QueryLogEntry) {
+        queryLog = (listOf(entry) + queryLog).take(30)
+    }
+
+    // Two queries per refresh, run concurrently: the rows table (indexed, ~ms) and ONE dashboard
+    // cube query that all three charts + KPI roll up from (see SalesRepository.dashboard — one
+    // scan instead of three). All charts update in a single state write, so the heavy Skiko chart
+    // recomposition happens once per refresh instead of once per chart.
     fun refresh() {
         val r = repo ?: return
         queryJob?.cancel()
         queryJob = scope.launch {
-            dashboard = r.dashboard(minAmount, category, country)
-            sample = r.sampleRows(minAmount, category, country, sort, asc)
+            launch {
+                val rowsResult = r.sampleRows(minAmount, category, country, sort, asc)
+                sample = rowsResult.rows
+                appendLog(rowsResult.entry)
+            }
+            launch {
+                val dashResult = r.dashboard(minAmount, category, country)
+                dashboard = dashResult.value
+                appendLog(dashResult.entry)
+            }
         }
     }
 
@@ -132,13 +158,14 @@ fun App() {
         building = true
         target = count
         progress = 0
+        buildPhase = ""
+        queryLog = emptyList()
         scope.launch {
             minAmount = 0; category = null; country = null
-            genMs = r.generate(count) { progress = it }
+            genMs = r.generate(count, onProgress = { progress = it }, onPhase = { buildPhase = it })
             rows = count
-            dashboard = r.dashboard(0, null, null)
-            sample = r.sampleRows(0, null, null, sort, asc)
             building = false
+            refresh()
         }
     }
 
@@ -155,10 +182,10 @@ fun App() {
                     val d = dashboard
                     when {
                         repo == null -> Text("Booting SQLite in your browser…", color = Muted)
-                        building -> BuildingBar(progress, target)
+                        building -> BuildingBar(progress, target, buildPhase)
                         d != null -> {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                Metric("Query time", "${d.queryMs} ms", accent = true)
+                                Metric("Latest query", "${queryLog.firstOrNull()?.ms ?: 0} ms", accent = true)
                                 Metric("Orders", d.count.grouped())
                                 Metric("Revenue", dollars(d.revenue))
                                 Metric("Avg order", money(d.avg.roundToInt()))
@@ -169,22 +196,31 @@ fun App() {
                                 color = Muted, fontSize = 13.sp,
                             )
 
+                            QueryLogCard(queryLog, onClear = { queryLog = emptyList() })
+
                             Filters(minAmount, category, country,
                                 onAmount = { minAmount = it }, onAmountDone = { refresh() },
                                 onCategory = { category = it; refresh() }, onCountry = { country = it; refresh() })
 
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                                 Box(Modifier.weight(1f)) {
-                                    PieCard("Revenue by category",
-                                        d.byCategory.entries.sortedByDescending { it.value }.map { PieData(it.key, (it.value / 100).toFloat()) })
+                                    // charty's PieChart, like its LineChart, throws on empty data — guard it
+                                    // for the zero-match filter case. (BarChart below is hand-drawn, so it's safe.)
+                                    if (d.byCategory.isNotEmpty()) {
+                                        PieCard("Revenue by category",
+                                            d.byCategory.entries.sortedByDescending { it.value }.map { PieData(it.key, (it.value / 100).toFloat()) })
+                                    }
                                 }
                                 Box(Modifier.weight(1f)) {
                                     BarChart("Orders by country",
                                         d.byCountry.entries.sortedByDescending { it.value }.map { it.key to it.value }) { it.grouped() }
                                 }
                             }
-                            LineCard("Revenue by month",
-                                d.byMonth.entries.sortedBy { it.key }.map { LineData(MONTHS.getOrElse(it.key) { "?" }, (it.value / 100).toFloat()) })
+                            // charty's LineChart throws on empty data — guard (e.g. a filter that matches nothing).
+                            if (d.byMonth.isNotEmpty()) {
+                                LineCard("Revenue by month",
+                                    d.byMonth.entries.sortedBy { it.key }.map { LineData(MONTHS.getOrElse(it.key) { "?" }, (it.value / 100).toFloat()) })
+                            }
 
                             RecordsTable(sample, sort, asc) { col ->
                                 if (sort == col) asc = !asc else { sort = col; asc = true }
@@ -236,12 +272,91 @@ private fun RowScope.Metric(label: String, value: String, accent: Boolean = fals
 }
 
 @Composable
-private fun BuildingBar(progress: Int, target: Int) {
+private fun BuildingBar(progress: Int, target: Int, phase: String) {
+    // Row inserts fill the bar; the post-insert phases (index builds, ANALYZE) take seconds at
+    // 1M rows with no row counter moving — the phase line is what shows the app isn't frozen.
+    val inserting = phase.startsWith("Inserting")
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Building the dataset in the browser… ${progress.toLong().grouped()} / ${target.toLong().grouped()} rows", color = Muted)
         Box(Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)).background(SCHEME.surfaceVariant)) {
             val frac = if (target > 0) (progress.toFloat() / target).coerceIn(0f, 1f) else 0f
             Box(Modifier.fillMaxWidth(frac).height(10.dp).clip(RoundedCornerShape(5.dp)).background(SCHEME.primary))
+        }
+        if (phase.isNotEmpty() && !inserting) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                Text(phase, color = Muted, fontSize = 13.sp)
+            }
+        }
+    }
+}
+
+private fun logColor(ms: Long): Color = when {
+    ms < 100 -> Color(0xFF16A34A)
+    ms < 300 -> Color(0xFFD97706)
+    else -> Color(0xFFDC2626)
+}
+
+/** A hand-drawn scroll thumb — Compose Multiplatform's VerticalScrollbar isn't available on wasmJs. */
+@Composable
+private fun ScrollIndicator(state: ScrollState, modifier: Modifier = Modifier) {
+    BoxWithConstraints(modifier.background(SCHEME.surfaceVariant, RoundedCornerShape(2.dp))) {
+        val max = state.maxValue.toFloat()
+        if (max > 0f) {
+            val viewport = state.viewportSize.toFloat().coerceAtLeast(1f)
+            val thumbFraction = (viewport / (max + viewport)).coerceIn(0.08f, 1f)
+            val thumbHeight = maxHeight * thumbFraction
+            val travel = maxHeight - thumbHeight
+            val progress = (state.value / max).coerceIn(0f, 1f)
+            Box(
+                Modifier
+                    .padding(top = travel * progress)
+                    .height(thumbHeight)
+                    .fillMaxWidth()
+                    .background(Muted, RoundedCornerShape(2.dp)),
+            )
+        }
+    }
+}
+
+@Composable
+private fun QueryLogCard(entries: List<QueryLogEntry>, onClear: () -> Unit) {
+    val scrollState = rememberScrollState()
+    AppCard {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Query log — every query behind the numbers above, timed live", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                if (entries.isNotEmpty()) {
+                    TextButton(onClick = onClear, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+                        Text("Clear")
+                    }
+                }
+            }
+            if (entries.isEmpty()) {
+                Text("No queries yet.", color = Muted, fontSize = 13.sp)
+            } else {
+                SelectionContainer {
+                    Row(Modifier.heightIn(max = 260.dp)) {
+                        Column(Modifier.weight(1f).verticalScroll(scrollState)) {
+                            entries.forEachIndexed { i, e ->
+                                if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(CardBorder))
+                                Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                        Text(e.label, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                        Text("${e.ms} ms", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = logColor(e.ms))
+                                    }
+                                    Text(e.sql, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Muted)
+                                }
+                            }
+                        }
+                        ScrollIndicator(scrollState, Modifier.width(4.dp).fillMaxHeight().padding(start = 8.dp))
+                    }
+                }
+            }
         }
     }
 }

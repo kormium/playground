@@ -31,8 +31,8 @@ kotlin {
     sourceSets {
         val wasmJsMain by getting {
             dependencies {
-                implementation("io.github.kormium:kormium-core:0.9.1")
-                implementation("io.github.kormium:kormium-sqlite-wasm:0.9.1")
+                implementation("io.github.kormium:kormium-core:0.10.0")
+                implementation("io.github.kormium:kormium-sqlite-wasm:0.10.0")
 
                 implementation(compose.runtime)
                 implementation(compose.foundation)
