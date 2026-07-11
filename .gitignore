@@ -45,3 +45,11 @@ bin/
 ### Mac OS ###
 .DS_Store
 .kotlin/
+
+# Crawled datasets (rebuild with :sql-demo:runJvm) — too big for git
+*.db
+*.db.gz
+repos.tsv
+repos.tsv.gz
+*.db-shm
+*.db-wal
