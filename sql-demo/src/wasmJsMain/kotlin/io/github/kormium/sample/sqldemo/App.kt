@@ -49,6 +49,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -94,6 +95,7 @@ import io.github.kormium.sample.sqldemo.github.RepoSort
 import io.github.kormium.sample.sqldemo.github.RepoStatus
 import io.github.kormium.sample.sqldemo.github.YEAR_MIN
 import io.github.kormium.sample.sqldemo.github.YEAR_MAX
+import kotlinx.browser.window
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -291,12 +293,18 @@ private const val KORMIUM_REPO_URL = "https://github.com/kormium/kormium"
 private const val KORMIUM_DOCS_URL = "https://github.com/kormium/kormium/blob/main/docs/README.md"
 
 /** Everything the sidebar can navigate to: the two live dashboards and the static doc pages. */
-private enum class Page(val label: String, val icon: Ico, val isDoc: Boolean) {
-    GITHUB("Kotlin ecosystem", Ico.DB, false),
-    SALES("Synthetic sales", Ico.BARS, false),
-    QUICK_START("Quick start", Ico.BOLT, true),
-    INSTALLATION("Installation", Ico.GRID, true),
-    BENCHMARKS("Benchmarks", Ico.TREND, true),
+private enum class Page(val label: String, val slug: String, val icon: Ico, val isDoc: Boolean) {
+    GITHUB("Kotlin ecosystem", "ecosystem", Ico.DB, false),
+    SALES("Synthetic sales", "sales", Ico.BARS, false),
+    QUICK_START("Quick start", "quick-start", Ico.BOLT, true),
+    INSTALLATION("Installation", "installation", Ico.GRID, true),
+    BENCHMARKS("Benchmarks", "benchmarks", Ico.TREND, true),
+}
+
+/** The page named by the current URL hash (e.g. `#/quick-start`), defaulting to the GitHub dashboard. */
+private fun pageFromHash(): Page {
+    val slug = window.location.hash.removePrefix("#").trim('/')
+    return Page.entries.firstOrNull { it.slug == slug } ?: Page.GITHUB
 }
 
 /** True on narrow (phone-width) viewports; drives the layout switches throughout the app. */
@@ -304,7 +312,17 @@ private val LocalCompact = staticCompositionLocalOf { false }
 
 @Composable
 fun App() {
-    var page by remember { mutableStateOf(Page.GITHUB) }
+    // The URL hash is the source of truth for the current page, so deep links, refreshes and the
+    // browser's back/forward buttons all work. Navigation writes the hash; the listener reads it.
+    var page by remember { mutableStateOf(pageFromHash()) }
+    DisposableEffect(Unit) {
+        window.onhashchange = { page = pageFromHash() }
+        onDispose { window.onhashchange = null }
+    }
+    fun navigate(p: Page) {
+        page = p
+        window.location.hash = "/${p.slug}"
+    }
     MaterialTheme(colorScheme = SCHEME) {
         BoxWithConstraints(Modifier.fillMaxSize().background(SCHEME.background)) {
             val compact = maxWidth < 720.dp
@@ -318,12 +336,12 @@ fun App() {
                 if (compact) {
                     // Phone: the rail collapses into a slim top header with a scrollable pill nav.
                     Column(Modifier.fillMaxSize()) {
-                        CompactNav(page) { page = it }
+                        CompactNav(page) { navigate(it) }
                         Box(Modifier.weight(1f).fillMaxWidth()) { PageContent(page) }
                     }
                 } else {
                     Row(Modifier.fillMaxSize()) {
-                        Sidebar(page) { page = it }
+                        Sidebar(page) { navigate(it) }
                         Box(Modifier.weight(1f).fillMaxHeight()) { PageContent(page) }
                     }
                 }
