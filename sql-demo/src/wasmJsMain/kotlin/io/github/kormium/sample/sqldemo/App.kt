@@ -52,6 +52,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -207,7 +208,7 @@ private fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
 
 // ---------- hand-drawn line icons (Compose/wasm's default font has no emoji glyphs) ----------
 
-private enum class Ico { BOLT, DB, STAR, FORK, GHOST, RECEIPT, MONEY, BARS, GRID, SEARCH, TREND, SCALE, API, INFO }
+private enum class Ico { BOLT, DB, STAR, FORK, GHOST, RECEIPT, MONEY, BARS, GRID, SEARCH, TREND, SCALE, API, INFO, CHEVRON_DOWN, CHEVRON_RIGHT, CHEVRON_UP }
 
 @Composable
 private fun Ico(kind: Ico, tint: Color, size: Dp = 20.dp) {
@@ -279,6 +280,9 @@ private fun Ico(kind: Ico, tint: Color, size: Dp = 20.dp) {
             Ico.SCALE -> { line(0.5f, 0.14f, 0.5f, 0.86f); line(0.22f, 0.28f, 0.78f, 0.28f); line(0.32f, 0.86f, 0.68f, 0.86f); drawArc(tint, 0f, 180f, false, topLeft = p(0.12f, 0.28f), size = Size(s * 0.2f, s * 0.2f), style = stroke); drawArc(tint, 0f, 180f, false, topLeft = p(0.68f, 0.28f), size = Size(s * 0.2f, s * 0.2f), style = stroke) }
             Ico.API -> { poly(0.34f, 0.28f, 0.16f, 0.5f, 0.34f, 0.72f, fill = false, close = false); poly(0.66f, 0.28f, 0.84f, 0.5f, 0.66f, 0.72f, fill = false, close = false); line(0.56f, 0.24f, 0.44f, 0.76f) }
             Ico.INFO -> { circle(0.5f, 0.5f, 0.42f); circle(0.5f, 0.32f, 0.03f, fill = true); line(0.5f, 0.46f, 0.5f, 0.7f) }
+            Ico.CHEVRON_DOWN -> poly(0.3f, 0.42f, 0.5f, 0.62f, 0.7f, 0.42f, fill = false, close = false)
+            Ico.CHEVRON_RIGHT -> poly(0.42f, 0.3f, 0.62f, 0.5f, 0.42f, 0.7f, fill = false, close = false)
+            Ico.CHEVRON_UP -> poly(0.3f, 0.58f, 0.5f, 0.38f, 0.7f, 0.58f, fill = false, close = false)
         }
     }
 }
@@ -323,6 +327,10 @@ fun App() {
         page = p
         window.location.hash = "/${p.slug}"
     }
+    // Wrapped in movableContentOf so switching between the compact and wide layouts (which place the
+    // content under different parents) moves the screen instead of recreating it — its remembered
+    // state, including the loaded 283k-repo database, survives a resize across the breakpoint.
+    val pageContent = remember { movableContentOf<Page> { p -> PageContent(p) } }
     MaterialTheme(colorScheme = SCHEME) {
         BoxWithConstraints(Modifier.fillMaxSize().background(SCHEME.background)) {
             val compact = maxWidth < 720.dp
@@ -337,12 +345,12 @@ fun App() {
                     // Phone: the rail collapses into a slim top header with a scrollable pill nav.
                     Column(Modifier.fillMaxSize()) {
                         CompactNav(page) { navigate(it) }
-                        Box(Modifier.weight(1f).fillMaxWidth()) { PageContent(page) }
+                        Box(Modifier.weight(1f).fillMaxWidth()) { pageContent(page) }
                     }
                 } else {
                     Row(Modifier.fillMaxSize()) {
                         Sidebar(page) { navigate(it) }
-                        Box(Modifier.weight(1f).fillMaxHeight()) { PageContent(page) }
+                        Box(Modifier.weight(1f).fillMaxHeight()) { pageContent(page) }
                     }
                 }
             }
@@ -767,7 +775,7 @@ private fun QueryLogCard(entries: List<LogLine>, onClear: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(if (expanded) "▾" else "▸", fontSize = 14.sp, color = Muted)
+                    Ico(if (expanded) Ico.CHEVRON_DOWN else Ico.CHEVRON_RIGHT, Muted, size = 14.dp)
                     Text("Query log — every query behind the numbers above, timed live", fontWeight = FontWeight.Bold, fontSize = 15.sp)
                     if (!expanded && entries.isNotEmpty()) {
                         Text("(${entries.size})", fontSize = 13.sp, color = Muted)
@@ -924,17 +932,28 @@ private fun RecordsTable(rows: List<OrderRow>, sort: SortCol, asc: Boolean, onSo
 
 @Composable
 private fun RowScope.SortHeader(label: String, col: SortCol, weight: Float, sort: SortCol, asc: Boolean, onSort: (SortCol) -> Unit) {
-    val arrow = if (sort == col) (if (asc) " ▲" else " ▼") else ""
-    Text(
-        label + arrow,
+    val active = sort == col
+    Row(
         Modifier.weight(weight).tapClickable { onSort(col) },
-        fontWeight = FontWeight.Bold, fontSize = 13.sp,
-        color = if (sort == col) SCHEME.primary else Muted,
-    )
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text(label, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = if (active) SCHEME.primary else Muted)
+        if (active) Ico(if (asc) Ico.CHEVRON_UP else Ico.CHEVRON_DOWN, SCHEME.primary, size = 12.dp)
+    }
 }
 
 @Composable
 private fun RowScope.Cell(text: String, weight: Float) = Text(text, Modifier.weight(weight), fontSize = 13.sp)
+
+/** A table cell with a leading drawn icon (the default font has no star/fork glyphs on Wasm). */
+@Composable
+private fun RowScope.IconCell(icon: Ico, text: String, weight: Float, tint: Color = Muted) {
+    Row(Modifier.weight(weight), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Ico(icon, tint, size = 13.dp)
+        Text(text, fontSize = 13.sp)
+    }
+}
 
 @Composable
 private fun CodeBlock(code: String) {
@@ -1185,8 +1204,8 @@ private fun GithubTable(rows: List<RepoRow>, sort: RepoSort, asc: Boolean, onSor
                                     maxLines = 1,
                                 )
                                 Text(r.topics.replace(",", ", ").ifEmpty { "—" }, Modifier.weight(2.4f), fontSize = 12.sp, color = Muted, maxLines = 1)
-                                Cell("★ ${r.stars.toLong().grouped()}", 1.0f)
-                                Cell("⑂ ${r.forks.toLong().grouped()}", 0.9f)
+                                IconCell(Ico.STAR, r.stars.toLong().grouped(), 1.0f, tint = Color(0xFFF59E0B))
+                                IconCell(Ico.FORK, r.forks.toLong().grouped(), 0.9f)
                                 Cell(r.license.ifEmpty { "—" }, 1.2f)
                                 Cell(r.createdAt, 1.1f)
                                 Cell(r.pushedAt.ifEmpty { "—" }, 1.1f)
@@ -1201,13 +1220,15 @@ private fun GithubTable(rows: List<RepoRow>, sort: RepoSort, asc: Boolean, onSor
 
 @Composable
 private fun RowScope.RepoSortHeader(label: String, col: RepoSort, weight: Float, sort: RepoSort, asc: Boolean, onSort: (RepoSort) -> Unit) {
-    val arrow = if (sort == col) (if (asc) " ▲" else " ▼") else ""
-    Text(
-        label + arrow,
+    val active = sort == col
+    Row(
         Modifier.weight(weight).tapClickable { onSort(col) },
-        fontWeight = FontWeight.Bold, fontSize = 13.sp,
-        color = if (sort == col) SCHEME.primary else Muted,
-    )
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text(label, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = if (active) SCHEME.primary else Muted)
+        if (active) Ico(if (asc) Ico.CHEVRON_UP else Ico.CHEVRON_DOWN, SCHEME.primary, size = 12.dp)
+    }
 }
 
 // ---------- reusable trend visuals (hand-drawn on Canvas for full control) ----------
